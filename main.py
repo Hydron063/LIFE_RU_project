@@ -1,13 +1,7 @@
 # -*- coding: utf-8 -*-
-# Кратные записи при необходимости указать несколько авторов в tabl1
-
-# Меняем на градиентный спуск
-# Запускаем большой датасет (на сервере)
-# Код - на гит
 # Посмотреть DeepPavlov
 
 import os
-
 import pandas as pd
 import category_encoders as ce
 import pymorphy2 as pymorphy2
@@ -21,9 +15,8 @@ from nltk.corpus import stopwords
 from nltk import regexp_tokenize, sent_tokenize
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.svm import SVR
+from sklearn.ensemble import GradientBoostingRegressor as GBR
 from sklearn.preprocessing import StandardScaler
-
-nltk.download('punkt')
 
 
 def get_text(url, encoding='utf-8', to_lower=True):
@@ -65,39 +58,61 @@ def tokenize_n_lemmatize(text, stopwords=None, normalize=True, regexp=r'(?u)\b\w
     return words
 
 
-## Создание csv из xlsx
-# read_file = pd.read_excel('LIFE_ru.xlsx', engine='openpyxl')
-# read_file.to_csv('LIFE_ru1.csv', index=None, header=True)
-# a_file = open("LIFE_ru1.csv", "r", encoding='utf_8')
-# lines = a_file.readlines()
-# a_file.close()
-# new_file = open("LIFE_ru2.csv", "w", encoding='utf_8')
-# for line in lines[5:]:
-#     new_file.write(line)
-# new_file.close()
+nltk.download('punkt')
 
-# f = open('res.txt', 'w', encoding='cp1251')
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', 20)
 
-# tabl = pd.read_csv('amp-may-GA2.csv', encoding='mbcs').dropna()
-tabl = pd.read_csv('LIFE_ru2.csv', encoding='utf_8').dropna()
-tabl1 = pd.read_csv('db-may-tags.csv', encoding='cp1251').dropna()
-print(tabl.shape, tabl1.shape)
-print(tabl.shape[0], tabl['URL материала'].nunique())
-print(tabl1.shape[0], tabl1['url'].nunique())
-# tabl1 = tabl1.groupby(['url']).sum().reset_index(name='counts')
-# print(tabl1[tabl1['counts']>1].sort_values('counts'))
-tabl = tabl.drop(set(tabl.columns) - {'Визиты', 'URL материала'}, axis=1)
-tabl = tabl.groupby(['URL материала']).sum().reset_index()
-print(tabl)
-tabl1.drop_duplicates('url', keep='first', inplace=True)
-print(tabl1.shape[0], tabl1['url'].nunique())
-print(tabl1['section'].head().to_string())
-print(tabl.head())
+# Исправляем ошибки в файлах
+path = './Выгрузки'
+f_list = os.listdir(path)
+for f in f_list:
+    if 'YM URL.' in f:
+        file1 = open(os.path.join(path, f), 'r', encoding='utf_8')
+        file2 = open(os.path.join(path, f[:-4] + ' cor.csv'), 'w', encoding='utf_8')
+        for s in file1:
+            if '#' in s:
+                s = s.split('#')[0] + '	' + s.split()[-1] + '\n'
+            file2.write(s)
+    if 'YM URL amp.' in f:
+        temp = pd.read_csv(os.path.join(path, f), encoding='utf_8', sep='	')
+        if temp.columns.tolist()[0] == 'Просмотры':
+            temp = temp[temp.columns.tolist()[1::-1]]
+            temp.to_csv(os.path.join(path, f), encoding='utf_8', sep='	', index=False)
 
-df = tabl.merge(tabl1, left_on='URL материала', right_on='url', left_index=False).drop(['URL материала', 'views'],
-                                                                                       axis=1)
+f_list = os.listdir(path)
+print('0')
+tabl1 = pd.concat(
+    (pd.read_csv(os.path.join(path, f), encoding='utf_8', sep='	') for f in f_list if 'YM URL cor.' in f)).dropna()
+print('1')
+tabl2 = pd.concat(
+    (pd.read_csv(os.path.join(path, f), encoding='utf_8', sep='	') for f in f_list if 'YM URL amp' in f)).dropna()
+print('2')
+tabl3 = pd.concat((pd.read_csv(os.path.join(path, f), encoding='cp1251') for f in f_list if 'DB.' in f)).dropna()
+print('3')
+
+print(tabl1.shape, tabl2.shape, tabl3.shape)
+print(tabl1.head(10))
+print(tabl1.shape[0], tabl1['URL материала'].nunique())
+print(tabl2.head(10))
+print(tabl2.shape[0], tabl2['URL trim amp'].nunique())
+print(tabl3.shape[0], tabl3['url'].nunique())
+
+tabl1 = tabl1.groupby(['URL материала']).sum().reset_index()
+print(tabl1)
+tabl2 = tabl2.groupby(['URL trim amp']).sum().reset_index()
+print(tabl2)
+tabl3.drop_duplicates('url', keep='first', inplace=True)
+print(tabl3.shape[0], tabl3['url'].nunique())
+print(tabl3['section'].head().to_string())
+print(tabl3.head())
+
+df = tabl1.merge(tabl2, left_on='URL материала', right_on='URL trim amp', left_index=False).drop(['URL trim amp'],
+                                                                                                 axis=1)
+df['Просмотры'] = df['Просмотры'] + df['Просмотры материалов']
+df.drop(['Просмотры материалов'], axis=1, inplace=True)
+print(df)
+df = df.merge(tabl3, left_on='URL материала', right_on='url', left_index=False).drop(['URL материала'], axis=1)
 print(df.head(20))
 print(df.columns)
 print(df.shape)
@@ -118,18 +133,29 @@ tags = set(y for interm in [x.split(';') for x in df['tags'].values.tolist()] fo
 for categorie in categories:
     df['ктг_' + categorie] = df['categories'].apply(lambda x: int(categorie in x))
 categories = ['ктг_' + categorie for categorie in categories]
-for tag in tags:
-    df['тег_' + tag] = df['tags'].apply(lambda x: int(tag in x))
-tags = ['тег_' + tag for tag in tags]
-print(df[list(tags)])
 
-# encoder = ce.OneHotEncoder(cols=['section'])
-# encoder.fit(df, df['Визиты'])
-# print(encoder.transform(df))
+temp = list(zip(*df['tags'].map(lambda x: [int(tag in x) for tag in tags])))
+temp = [pd.Series(x) for x in temp]
+tags = ['тег_' + tag for tag in tags]
+temp = pd.concat(temp, axis=1, ignore_index=True)
+temp.set_axis(tags, axis=1, inplace=True)
+print(temp.head(10))
+print(temp.shape)
+print(df.shape)
+
+df = pd.concat([df, temp], axis=1)
+print(df.columns)
+print(df[list(tags)])
+# for i, c in enumerate(['тег_' + tag for tag in tags]):
+#     df[c] = temp[i]
+# for tag in tags:
+#     df['тег_' + tag] = df['tags'].apply(lambda x: int(tag in x))
+# tags = ['тег_' + tag for tag in tags]
+
 escape = True
 if not escape:
     encoder = ce.TargetEncoder()
-    df['section'] = encoder.fit_transform(df['section'], df['Визиты'])
+    df['section'] = encoder.fit_transform(df['section'], df['Просмотры'])
     print(encoder.get_feature_names())
 
     url_stopwords_ru = "https://raw.githubusercontent.com/stopwords-iso/stopwords-ru/master/stopwords-ru.txt"
@@ -158,10 +184,19 @@ scaler = StandardScaler()
 X = scaler.fit_transform(VarianceThreshold().fit_transform(X))
 X = SelectKBest(f_regression, k=50).fit_transform(X, y)
 
-parameters = {'kernel': ('linear', 'poly', 'rbf'), 'C': [2 ** x for x in range(15, 19, 2)]}
-regr = GridSearchCV(estimator=SVR(), param_grid=parameters, scoring=make_scorer(mape), cv=5)
+# parameters = {'kernel': ('linear', 'poly', 'rbf'), 'C': [2 ** x for x in range(19, 20, 2)], 'degree': [3, 4, 5]}
+# regr = GridSearchCV(estimator=SVR(),
+#                     param_grid=parameters, scoring=make_scorer(mape, greater_is_better=False), cv=5)
+parameters = {'learning_rate': [0.1 + 0.05 * x for x in range(1, 9)], 'n_estimators': [25, 50, 75, 100],
+              'max_depth': [7, 9, 11], 'max_features': ['sqrt'], 'subsample': [0.8, 1],
+              'loss': ['lad']}
+regr = GridSearchCV(estimator=GBR(min_samples_split=0.0005, subsample=1, random_state=42),
+                    param_grid=parameters, scoring=make_scorer(mape, greater_is_better=False), cv=5)
 regr.fit(X, y)
+estimator = regr.best_estimator_
+print(y[:20])
+print(estimator.predict(X)[:20])
 print(regr.best_params_)
 print(regr.best_score_)
-estimator = regr.best_estimator_
+print(mape(y[:20], estimator.predict(X[:20])))
 print(mape(y, estimator.predict(X)))
