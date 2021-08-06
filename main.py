@@ -1,21 +1,31 @@
 # -*- coding: utf-8 -*-
-# Посмотреть DeepPavlov
+# 0.82 1.07
+# {'learning_rate': 0.2, 'loss': 'lad', 'max_depth': 6, 'max_features': 'sqrt', 'n_estimators': 90, 'subsample': 1}
+# K = 500
+# 35
+# ['Просмотры', 'section', 'countSymbols', 'year', 'month', 'day', 'time', 'ктг_Происшествия', 'тег_' ...]
+# 31559 признаков
 
 import os
 import pandas as pd
 import category_encoders as ce
 import pymorphy2 as pymorphy2
 import requests
+from keras import Sequential
+from keras.layers import Dense
+from keras.wrappers.scikit_learn import KerasRegressor
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.feature_selection import SelectKBest, f_regression, VarianceThreshold
 from sklearn.metrics import mean_absolute_percentage_error as mape, make_scorer
+from sklearn.linear_model import Ridge
 from scipy import sparse
+import pickle
 import nltk
 from nltk.corpus import stopwords
 from nltk import regexp_tokenize, sent_tokenize
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, GridSearchCV, KFold, cross_val_score
 from sklearn.svm import SVR
-from sklearn.ensemble import GradientBoostingRegressor as GBR
+from sklearn.ensemble import GradientBoostingRegressor as GBR, RandomForestRegressor as RFR
 from sklearn.preprocessing import StandardScaler
 
 
@@ -58,6 +68,10 @@ def tokenize_n_lemmatize(text, stopwords=None, normalize=True, regexp=r'(?u)\b\w
     return words
 
 
+categories = ['Происшествия', 'Личные финансы', 'В мире', 'Технологии', 'Спорт', 'Наука', 'Культура', 'Регионы', 'Шоубиз',
+     'Эксклюзивы', 'Авто', 'Армия', 'Политика', 'Общество', 'Здоровье', 'История', 'Россия', 'Экономика', 'Коронавирус',
+     'Криминал', 'Поп-культура и Развлечения', 'Наука и Технологии', 'Интересное', 'новости', 'сша']
+
 nltk.download('punkt')
 
 pd.set_option('display.max_columns', None)
@@ -81,15 +95,11 @@ for f in f_list:
             temp.to_csv(os.path.join(path, f), encoding='utf_8', sep='	', index=False)
 
 f_list = os.listdir(path)
-print('0')
 tabl1 = pd.concat(
     (pd.read_csv(os.path.join(path, f), encoding='utf_8', sep='	') for f in f_list if 'YM URL cor.' in f)).dropna()
-print('1')
 tabl2 = pd.concat(
     (pd.read_csv(os.path.join(path, f), encoding='utf_8', sep='	') for f in f_list if 'YM URL amp' in f)).dropna()
-print('2')
 tabl3 = pd.concat((pd.read_csv(os.path.join(path, f), encoding='cp1251') for f in f_list if 'DB.' in f)).dropna()
-print('3')
 
 print(tabl1.shape, tabl2.shape, tabl3.shape)
 print(tabl1.head(10))
@@ -118,80 +128,131 @@ print(df.columns)
 print(df.shape)
 print(df['categories'].unique())
 print(df['author'].nunique())
+print(df['section'].unique())
 print(df['publicationDate'])
-df['publicationDate'] = pd.to_datetime(df['publicationDate'])
-df['date'] = pd.to_datetime(df['publicationDate'].dt.date)
-print(df['date'])
-df['year'] = df['date'].dt.year
-df['month'] = df['date'].dt.month
-df['day'] = df['date'].dt.day
-df['time'] = (df['publicationDate'] - df['date']).dt.total_seconds()
-print(df['time'])
 
-categories = set(y for interm in [x.split(';') for x in df['categories'].values.tolist()] for y in interm)
-tags = set(y for interm in [x.split(';') for x in df['tags'].values.tolist()] for y in interm)
-for categorie in categories:
-    df['ктг_' + categorie] = df['categories'].apply(lambda x: int(categorie in x))
-categories = ['ктг_' + categorie for categorie in categories]
-
-temp = list(zip(*df['tags'].map(lambda x: [int(tag in x) for tag in tags])))
-temp = [pd.Series(x) for x in temp]
-tags = ['тег_' + tag for tag in tags]
-temp = pd.concat(temp, axis=1, ignore_index=True)
-temp.set_axis(tags, axis=1, inplace=True)
-print(temp.head(10))
-print(temp.shape)
-print(df.shape)
-
-df = pd.concat([df, temp], axis=1)
-print(df.columns)
-print(df[list(tags)])
-# for i, c in enumerate(['тег_' + tag for tag in tags]):
-#     df[c] = temp[i]
-# for tag in tags:
-#     df['тег_' + tag] = df['tags'].apply(lambda x: int(tag in x))
-# tags = ['тег_' + tag for tag in tags]
-
+# Пропуск предобработки
 escape = True
 if not escape:
+    df['publicationDate'] = pd.to_datetime(df['publicationDate'])
+    df['date'] = pd.to_datetime(df['publicationDate'].dt.date)
+    print(df['date'])
+    df['year'] = df['date'].dt.year
+    df['month'] = df['date'].dt.month
+    df['day'] = df['date'].dt.day
+    df['time'] = (df['publicationDate'] - df['date']).dt.total_seconds()
+    print(df['time'])
+
+    # categories = set(y for interm in [x.split(';') for x in df['categories'].values.tolist()] for y in interm)
+    for categorie in categories:
+        df['ктг_' + categorie] = df['categories'].apply(lambda x: int(categorie in x))
+    categories = ['ктг_' + categorie for categorie in categories]
+
+    tags = list(set(y for interm in [x.split(';') for x in df['tags'].values.tolist()] for y in interm))
+    tags = ['тег_' + tag for tag in tags]
+    temp = list(zip(*df['tags'].map(lambda x: [int(tag in x) for tag in tags])))
+    temp = [pd.Series(x) for x in temp]
+    temp = pd.concat(temp, axis=1, ignore_index=True)
+    temp.set_axis(tags, axis=1, inplace=True)
+    print(temp.head(10))
+    print(temp.shape)
+    print(df.shape)
+    df = pd.concat([df, temp], axis=1)
+
     encoder = ce.TargetEncoder()
     df['section'] = encoder.fit_transform(df['section'], df['Просмотры'])
     print(encoder.get_feature_names())
 
     url_stopwords_ru = "https://raw.githubusercontent.com/stopwords-iso/stopwords-ru/master/stopwords-ru.txt"
     stopwords_ru = get_text(url_stopwords_ru).splitlines()
-    print(stopwords_ru)
     expr = r'(?u)\b\w{4,}\b'
-    df['title'] = df["title"].apply(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
+
+    # Обработка по частям из-за проблем с производительностью
+    # df1 = df['title'][:10000]
+    # df1 = df1.map(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
+    # print(df1)
+    # print(df1.shape)
+    # df1.to_csv('df.csv', index=False)
+    # exit()
+
+    # df_res = df['title'][10000:20000]
+    # df_res = df_res.map(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
+    # df1 = pd.read_csv('df.csv').squeeze()
+    # print(df1.shape, df_res.shape)
+    # df1 = df1.append(df_res)
+    # df1.to_csv('df.csv', index=False)
+    # print(type(df_res), type(df1))
+    # print(df_res.shape, df1.shape)
+    # exit()
+
+    # df_res = df['title'][20000:30000]
+    # df_res = df_res.map(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
+    # df1 = pd.read_csv('df.csv').squeeze()
+    # print(df1.shape, df_res.shape)
+    # df1 = df1.append(df_res)
+    # df1.to_csv('df.csv', index=False)
+    # print(type(df_res), type(df1))
+    # print(df_res.shape, df1.shape)
+    # exit()
+
+    # df_res = df['title'][30000:]
+    # df_res = df_res.map(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
+    # df1 = pd.read_csv('df.csv').squeeze()
+    # print(df1.shape, df_res)
+    # df1 = df1.append(df_res)
+    # df1.to_csv('df.csv', index=False)
+    # print(type(df_res), type(df1))
+    # print(df_res.shape, df1.shape)
+    # exit()
+
+    df1 = pd.read_csv('df.csv').squeeze()
+    print(df1.shape)
+
+    # df2['title'] = df2['title'].apply(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
+    # df['title'] = df['title'].apply(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
+    # df.to_csv('df.csv')
 
     v = TfidfVectorizer(token_pattern=expr)
-    df1 = v.fit_transform(df['title'])
+    # df1 = v.fit_transform(df['title'])
+    df1 = v.fit_transform(df1)
     print(type(df1))
     print((v.get_feature_names()))
     print(df1)
+    print(df1.shape)
 
-    df = df.drop(['publicationDate', 'date', 'title', 'url', 'author', 'tags', 'categories'], axis=1)
+    with open('section_save.txt', 'wb') as fp:
+        pickle.dump(encoder, fp)
+        pickle.dump(tags, fp)
+        pickle.dump(v, fp)
+
+    df = df.drop(['publicationDate', 'date', 'title', 'url', 'author', 'tags', 'categories', 'views'], axis=1)
+    print('df')
+    print(df.shape)
+    print(df.head(5))
     print(df.columns.to_series().groupby(df.dtypes).groups)
     matr = sparse.hstack((sparse.coo_matrix(df.values), df1))
     print(matr.shape, df1.shape)
     sparse.save_npz('interm.npz', matr)
+    exit()
 else:
     matr = sparse.load_npz('interm.npz')
     print(matr.shape)
 y = matr.toarray()[:, :1].ravel()
 X = matr.toarray()[:, 1:]
 scaler = StandardScaler()
+with open('scaler.pkl', 'wb') as fp:
+    pickle.dump(scaler, fp)
 X = scaler.fit_transform(VarianceThreshold().fit_transform(X))
-X = SelectKBest(f_regression, k=50).fit_transform(X, y)
 
-# parameters = {'kernel': ('linear', 'poly', 'rbf'), 'C': [2 ** x for x in range(19, 20, 2)], 'degree': [3, 4, 5]}
-# regr = GridSearchCV(estimator=SVR(),
-#                     param_grid=parameters, scoring=make_scorer(mape, greater_is_better=False), cv=5)
-parameters = {'learning_rate': [0.1 + 0.05 * x for x in range(1, 9)], 'n_estimators': [25, 50, 75, 100],
-              'max_depth': [7, 9, 11], 'max_features': ['sqrt'], 'subsample': [0.8, 1],
+X = SelectKBest(f_regression, k=2000).fit_transform(X, y)
+
+# Градиентный бустинг
+parameters = {'learning_rate': [0.05 + 0.05 * x for x in range(8)], 'n_estimators': [40, 50, 60, 75, 90],
+              'max_depth': [5, 6, 7, 8], 'max_features': ['sqrt'], 'subsample': [1],
               'loss': ['lad']}
 regr = GridSearchCV(estimator=GBR(min_samples_split=0.0005, subsample=1, random_state=42),
-                    param_grid=parameters, scoring=make_scorer(mape, greater_is_better=False), cv=5)
+                    param_grid=parameters, scoring=make_scorer(mape, greater_is_better=False), cv=5, n_jobs=-1)
+
 regr.fit(X, y)
 estimator = regr.best_estimator_
 print(y[:20])
@@ -200,3 +261,22 @@ print(regr.best_params_)
 print(regr.best_score_)
 print(mape(y[:20], estimator.predict(X[:20])))
 print(mape(y, estimator.predict(X)))
+pickle.dump(estimator, open('model.sav', 'wb'))
+
+# # Нейронка
+# print(X.shape)
+# def baseline_model():
+#     model = Sequential()
+#     model.add(Dense(X.shape[1], input_dim=X.shape[1], kernel_initializer='normal', activation='relu'))
+#     model.add(Dense(X.shape[1]//2, kernel_initializer='normal', activation='relu'))
+#     model.add(Dense(X.shape[1]//4, kernel_initializer='normal', activation='relu'))
+#     model.add(Dense(1, kernel_initializer='normal'))
+#     model.compile(loss='mean_absolute_percentage_error', optimizer='adam', metrics=['mean_absolute_percentage_error'])
+#     return model
+#
+# estimator = KerasRegressor(build_fn=baseline_model, epochs=50, batch_size=40000)
+# kfold = KFold(n_splits=5)
+# res = cross_val_score(estimator, X, y, cv=kfold)
+# print(res, -res.mean())
+# estimator.fit(X, y, epochs=100, batch_size=40000)
+# estimator.model.save('neuron_model')
