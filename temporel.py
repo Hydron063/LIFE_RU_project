@@ -1,19 +1,16 @@
 # -*- coding: utf-8 -*-
-# 0.82 1.07
-# {'learning_rate': 0.2, 'loss': 'lad', 'max_depth': 6, 'max_features': 'sqrt', 'n_estimators': 90, 'subsample': 1}
-# K = 500
-# 35
-# ['Просмотры', 'section', 'countSymbols', 'year', 'month', 'day', 'time', 'ктг_Происшествия', 'тег_' ...]
-# 31559 признаков
+# ['Просмотры',  'publicationDate', 'section', 'countSymbols', 'ктг_Происшествия' ...]
+# 1) Добавить scale для y
 
+import warnings
+warnings.filterwarnings("ignore")
 import os
 import pandas as pd
 import category_encoders as ce
+import paramiko
 import pymorphy2 as pymorphy2
 import requests
-from keras import Sequential
-from keras.layers import Dense
-from keras.wrappers.scikit_learn import KerasRegressor
+import sklearn
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.feature_selection import SelectKBest, f_regression, VarianceThreshold
 from sklearn.metrics import mean_absolute_percentage_error as mape, make_scorer
@@ -27,6 +24,12 @@ from sklearn.model_selection import train_test_split, GridSearchCV, KFold, cross
 from sklearn.svm import SVR
 from sklearn.ensemble import GradientBoostingRegressor as GBR, RandomForestRegressor as RFR
 from sklearn.preprocessing import StandardScaler
+from bert_serving.client import BertClient
+from datetime import datetime, timedelta
+from catboost import CatBoostRegressor, Pool, cv
+import numpy as np
+from scipy.stats import truncnorm
+from openTSNE import TSNE
 
 
 def get_text(url, encoding='utf-8', to_lower=True):
@@ -131,33 +134,21 @@ print(df['author'].nunique())
 print(df['section'].unique())
 print(df['publicationDate'])
 
-# Пропуск предобработки
+last_date = df['publicationDate'].max()
+last_date = (datetime.strptime(last_date, '%Y-%m-%d %H:%M:%S').date()).strftime('%Y-%m-%d %H:%M:%S')
+print(last_date, type(last_date))
+df = df[df['publicationDate'] < last_date]
+df = df.sort_values(by='publicationDate', ascending=False).head(3000)
+df = df.reset_index(drop=True)
+print(df)
+
 escape = True
 if not escape:
-    df['publicationDate'] = pd.to_datetime(df['publicationDate'])
-    df['date'] = pd.to_datetime(df['publicationDate'].dt.date)
-    print(df['date'])
-    df['year'] = df['date'].dt.year
-    df['month'] = df['date'].dt.month
-    df['day'] = df['date'].dt.day
-    df['time'] = (df['publicationDate'] - df['date']).dt.total_seconds()
-    print(df['time'])
-
     # categories = set(y for interm in [x.split(';') for x in df['categories'].values.tolist()] for y in interm)
     for categorie in categories:
         df['ктг_' + categorie] = df['categories'].apply(lambda x: int(categorie in x))
     categories = ['ктг_' + categorie for categorie in categories]
-
-    tags = list(set(y for interm in [x.split(';') for x in df['tags'].values.tolist()] for y in interm))
-    tags = ['тег_' + tag for tag in tags]
-    temp = list(zip(*df['tags'].map(lambda x: [int(tag in x) for tag in tags])))
-    temp = [pd.Series(x) for x in temp]
-    temp = pd.concat(temp, axis=1, ignore_index=True)
-    temp.set_axis(tags, axis=1, inplace=True)
-    print(temp.head(10))
-    print(temp.shape)
-    print(df.shape)
-    df = pd.concat([df, temp], axis=1)
+    # print(list(df.columns.values))
 
     encoder = ce.TargetEncoder()
     df['section'] = encoder.fit_transform(df['section'], df['Просмотры'])
@@ -166,117 +157,128 @@ if not escape:
     url_stopwords_ru = "https://raw.githubusercontent.com/stopwords-iso/stopwords-ru/master/stopwords-ru.txt"
     stopwords_ru = get_text(url_stopwords_ru).splitlines()
     expr = r'(?u)\b\w{4,}\b'
+    df['title'] = df['title'].apply(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
+    df.to_csv('df.csv')
 
-    # Обработка по частям из-за проблем с производительностью
-    # df1 = df['title'][:10000]
-    # df1 = df1.map(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
-    # print(df1)
-    # print(df1.shape)
-    # df1.to_csv('df.csv', index=False)
-    # exit()
-
-    # df_res = df['title'][10000:20000]
-    # df_res = df_res.map(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
-    # df1 = pd.read_csv('df.csv').squeeze()
-    # print(df1.shape, df_res.shape)
-    # df1 = df1.append(df_res)
-    # df1.to_csv('df.csv', index=False)
-    # print(type(df_res), type(df1))
-    # print(df_res.shape, df1.shape)
-    # exit()
-
-    # df_res = df['title'][20000:30000]
-    # df_res = df_res.map(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
-    # df1 = pd.read_csv('df.csv').squeeze()
-    # print(df1.shape, df_res.shape)
-    # df1 = df1.append(df_res)
-    # df1.to_csv('df.csv', index=False)
-    # print(type(df_res), type(df1))
-    # print(df_res.shape, df1.shape)
-    # exit()
-
-    # df_res = df['title'][30000:]
-    # df_res = df_res.map(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
-    # df1 = pd.read_csv('df.csv').squeeze()
-    # print(df1.shape, df_res)
-    # df1 = df1.append(df_res)
-    # df1.to_csv('df.csv', index=False)
-    # print(type(df_res), type(df1))
-    # print(df_res.shape, df1.shape)
-    # exit()
-
-    df1 = pd.read_csv('df.csv').squeeze()
-    print(df1.shape)
-
-    # df2['title'] = df2['title'].apply(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
-    # df['title'] = df['title'].apply(lambda x: ' '.join(tokenize_n_lemmatize(x, stopwords=stopwords_ru, regexp=expr)))
-    # df.to_csv('df.csv')
-
-    v = TfidfVectorizer(token_pattern=expr)
-    # df1 = v.fit_transform(df['title'])
-    df1 = v.fit_transform(df1)
-    print(type(df1))
-    print((v.get_feature_names()))
-    print(df1)
-    print(df1.shape)
-
-    with open('section_save.txt', 'wb') as fp:
+    with open('encoder.sav', 'wb') as fp:
         pickle.dump(encoder, fp)
-        pickle.dump(tags, fp)
-        pickle.dump(v, fp)
 
-    df = df.drop(['publicationDate', 'date', 'title', 'url', 'author', 'tags', 'categories', 'views'], axis=1)
+    client = BertClient()
+    vectors = client.encode(df['title'].tolist())
+    print(vectors.shape)
+
+    df = df.drop(['title', 'url', 'author', 'tags', 'categories', 'views'], axis=1)
     print('df')
     print(df.shape)
     print(df.head(5))
     print(df.columns.to_series().groupby(df.dtypes).groups)
-    matr = sparse.hstack((sparse.coo_matrix(df.values), df1))
-    print(matr.shape, df1.shape)
-    sparse.save_npz('interm.npz', matr)
+    vectors = pd.DataFrame(data=vectors, index=range(vectors.shape[0]), columns=range(vectors.shape[1]))
+    df = pd.concat([df, vectors], axis=1)
+    with open('final.sav', 'wb') as fp:
+        pickle.dump(df, fp)
+    print(df)
     exit()
+
+with open('final.sav', 'rb') as fp:
+    matr = pickle.load(fp)
+print(np.array(matr).shape, type(matr))
+print(matr)
+y = matr['Просмотры']
+interm = matr['publicationDate']
+skip_reduct=False
+n_comp = 100
+X = matr.drop(['publicationDate', 'Просмотры'], axis=1).to_numpy()[:, :100]
+if not skip_reduct:
+    reduction = TSNE(n_components=3, random_state=42, verbose=True)
+    print(X.shape)
+    X = reduction.fit(X)
+    print(X)
+    print(type(X))
+    with open('reduction.pkl', 'wb') as fp:
+        pickle.dump(X, fp)
+    print('OK')
 else:
-    matr = sparse.load_npz('interm.npz')
-    print(matr.shape)
-y = matr.toarray()[:, :1].ravel()
-X = matr.toarray()[:, 1:]
+    with open('reduction.pkl', 'rb') as fp:
+        reduction = pickle.load(fp)
+    X = reduction.transform(X)
+
+# # Демонстрация
+# y_test = y.tolist()
+# a, b = min(y_test), max(y_test)
+# mean, std = np.mean(y_test), np.std(y_test)
+# print(len(X), a, b, mean, std)
+# y_comp = truncnorm.rvs((a-mean)/std, (b-mean)/std, loc=mean, scale=std, size=len(X))
+# print('Результат для нормального распредения:')
+# print(y_comp)
+# print(mape(y_test, y_comp))
+# print(np.mean(y_comp), np.std(y_comp))
+# # 1000 50000 2000 200
+# y_comp = truncnorm.rvs(-10, 10, 30, 2, size=1000000)
+# print(min(y_comp), max(y_comp), np.mean(y_comp), np.std(y_comp))
+# exit()
+
 scaler = StandardScaler()
+X = scaler.fit_transform(VarianceThreshold().fit_transform(X))
 with open('scaler.pkl', 'wb') as fp:
     pickle.dump(scaler, fp)
-X = scaler.fit_transform(VarianceThreshold().fit_transform(X))
+X = pd.DataFrame(X)
+X[n_comp] = interm
+print(X)
+print(type(X))
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-X = SelectKBest(f_regression, k=2000).fit_transform(X, y)
+# Catboost
+cv_data = Pool(data=X_train, label=y_train, cat_features=[100])
+params = {
+    'iterations': 3294,
+    'learning_rate': 0.001,
+    'loss_function': 'MAPE',
+    'eval_metric': 'MAPE'
+}
+scores = cv(cv_data, params=params, fold_count=5)
+print(scores)
+test_data = Pool(data=X_test, label=y_test, cat_features=[100])
+# 2000 записей: 3294 0.001 = 0.65/0.7
+model = CatBoostRegressor(iterations=3294, learning_rate=0.001, loss_function='MAPE', eval_metric='MAPE')
+model.fit(cv_data)
+model.save_model('model.cbm', format='cbm')
 
-# Градиентный бустинг
-parameters = {'learning_rate': [0.05 + 0.05 * x for x in range(8)], 'n_estimators': [40, 50, 60, 75, 90],
-              'max_depth': [5, 6, 7, 8], 'max_features': ['sqrt'], 'subsample': [1],
-              'loss': ['lad']}
-regr = GridSearchCV(estimator=GBR(min_samples_split=0.0005, subsample=1, random_state=42),
-                    param_grid=parameters, scoring=make_scorer(mape, greater_is_better=False), cv=5, n_jobs=-1)
-
-regr.fit(X, y)
-estimator = regr.best_estimator_
-print(y[:20])
-print(estimator.predict(X)[:20])
-print(regr.best_params_)
-print(regr.best_score_)
-print(mape(y[:20], estimator.predict(X[:20])))
-print(mape(y, estimator.predict(X)))
-pickle.dump(estimator, open('model.sav', 'wb'))
+y_test = y_test.tolist()
+a, b = min(y_test), max(y_test)
+mean, std = (a+b)/2, np.std(y_test)
+model = CatBoostRegressor()
+model.load_model('model.cbm', format='cbm')
+prediction = model.predict(test_data)
+print('Результат модели:')
+print(mape(y_test, prediction))
 
 # # Нейронка
-# print(X.shape)
 # def baseline_model():
 #     model = Sequential()
-#     model.add(Dense(X.shape[1], input_dim=X.shape[1], kernel_initializer='normal', activation='relu'))
-#     model.add(Dense(X.shape[1]//2, kernel_initializer='normal', activation='relu'))
-#     model.add(Dense(X.shape[1]//4, kernel_initializer='normal', activation='relu'))
+#     model.add(Dense(256, input_dim=X.shape[1], kernel_initializer='normal', activation='relu',
+#       kernel_regularizer=l1(0.00001)))
+#     model.add(Dense(64, kernel_initializer='normal', activation='relu', kernel_regularizer=l1(0.00001)))
 #     model.add(Dense(1, kernel_initializer='normal'))
 #     model.compile(loss='mean_absolute_percentage_error', optimizer='adam', metrics=['mean_absolute_percentage_error'])
 #     return model
 #
-# estimator = KerasRegressor(build_fn=baseline_model, epochs=50, batch_size=40000)
-# kfold = KFold(n_splits=5)
+# epochs = 100
+# test_size = 30
+# estimator = KerasRegressor(build_fn=baseline_model, epochs=epochs, batch_size=X.shape[0])
+# kfold = KFold(n_splits=4)
 # res = cross_val_score(estimator, X, y, cv=kfold)
 # print(res, -res.mean())
-# estimator.fit(X, y, epochs=100, batch_size=40000)
+# estimator.fit(X[test_size:], y[test_size:], epochs=epochs, batch_size=X.shape[0])
 # estimator.model.save('neuron_model')
+#
+# # print(type(X))
+# # estimator = keras.models.load_model('./neuron_model')
+# prediction, y_true = estimator.predict(X[:test_size]), y[:test_size]
+# print(y_true)
+# print(prediction)
+# # print(mape(y, prediction))
+# print(mape(y_true, prediction))
+
+# bert-serving-start -model_dir ./model/uncased_L-12_H-768_A-12/ -num_worker=1
+# bert-serving-start -model_dir E:/PycharmProjets/Trucs_pythoniques/model/rubert_cased_L-12_H-768_A-12_v1/ -num_worker=1
+# bert-serving-start -model_dir ./model/rubert_cased_L-12_H-768_A-12_v1/ -num_worker=1
